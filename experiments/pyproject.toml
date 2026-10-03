@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "diverse-coupling"
+version = "0.1.0"
+description = "Empirical optimal coupling and directly weighted joint generative training"
+requires-python = ">=3.10"
+dependencies = ["numpy>=1.24", "scipy>=1.10", "torch>=2.2"]
+
+[project.optional-dependencies]
+demos = ["matplotlib>=3.7"]
+
+[project.scripts]
+diverse-coupling = "diverse_coupling.cli:main"
+diverse-demos = "diverse_coupling.demos.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

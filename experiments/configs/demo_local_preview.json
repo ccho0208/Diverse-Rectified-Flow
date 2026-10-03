@@ -1,0 +1,20 @@
+{
+  "experiments": ["gmm8", "two_disks", "rings"],
+  "training_samples": 256,
+  "marginal_samples": 512,
+  "evaluation_samples": 1024,
+  "marginal_epochs": 600,
+  "joint_epochs": 1000,
+  "transport_epochs": 600,
+  "hidden_sizes": [64, 64, 64],
+  "chunk_size": 512,
+  "checkpoint_every": 100,
+  "ode_steps": 100,
+  "display_samples": 32,
+  "display_frames": 21,
+  "grid_size": 15,
+  "ring_components": 2,
+  "seed": 0,
+  "device": "cpu",
+  "cpu_threads": 1
+}
