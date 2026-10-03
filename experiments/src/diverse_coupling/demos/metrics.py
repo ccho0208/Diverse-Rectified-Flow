@@ -38,6 +38,7 @@ def component_pair_matrix(
     Y: np.ndarray,
     spec: ExperimentSpec,
     weights: np.ndarray | None = None,
+    *, x_side: str = "x", y_side: str = "y",
 ) -> np.ndarray:
     """Weighted joint component probabilities; rows are X, columns are Y."""
     x = _points(X, "X")
@@ -45,7 +46,7 @@ def component_pair_matrix(
     if len(x) != len(y):
         raise ValueError("Paired X and Y must have equal sample counts")
     masses = _weights(len(x), weights)
-    labels = spec.classify(x, "x") * spec.components + spec.classify(y, "y")
+    labels = spec.classify(x, x_side) * spec.components + spec.classify(y, y_side)
     return np.bincount(
         labels, weights=masses, minlength=spec.components**2
     ).reshape(spec.components, spec.components)
@@ -129,6 +130,7 @@ def evaluate_pairs(
     reference_Y: np.ndarray | None = None,
     weights: np.ndarray | None = None,
     seed: int = 0,
+    x_side: str = "x", y_side: str = "y",
 ) -> dict:
     """Evaluate a fixed empirical coupling or generated joint outputs.
 
@@ -142,7 +144,7 @@ def evaluate_pairs(
     if len(x) != len(y):
         raise ValueError("Paired X and Y must have equal sample counts")
     masses = _weights(len(x), weights)
-    table = component_pair_matrix(x, y, spec, masses)
+    table = component_pair_matrix(x, y, spec, masses, x_side=x_side, y_side=y_side)
     result = {
         "mismatch_reward": float(table.sum() - np.trace(table)),
         "squared_distance_reward": float(np.dot(masses, np.sum((x - y) ** 2, axis=1))),
@@ -151,8 +153,8 @@ def evaluate_pairs(
         "y_component_frequencies": table.sum(axis=0).tolist(),
     }
     if spec.name in ("two_disks", "rings"):
-        result["x_off_support_mass"] = float(np.dot(masses, ~spec.support_mask(x, "x")))
-        result["y_off_support_mass"] = float(np.dot(masses, ~spec.support_mask(y, "y")))
+        result["x_off_support_mass"] = float(np.dot(masses, ~spec.support_mask(x, x_side)))
+        result["y_off_support_mass"] = float(np.dot(masses, ~spec.support_mask(y, y_side)))
     for side, samples, reference in (("x", x, reference_X), ("y", y, reference_Y)):
         if reference is None:
             continue

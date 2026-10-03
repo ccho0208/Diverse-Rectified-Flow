@@ -19,7 +19,7 @@ from diverse_coupling.demos.metrics import (
 class DemoDatasetTests(unittest.TestCase):
     def test_disks_are_uniform_in_area_at_the_agreed_centers(self):
         spec = build_spec("two_disks")
-        for side, horizontal in (("x", -2), ("y", 2)):
+        for side, horizontal in (("source", -2), ("x", 2), ("y", 2)):
             points, labels = spec.sample(100_000, np.random.default_rng(17), side)
             centers = spec.centers(side)
             np.testing.assert_array_equal(centers[:, 0], [horizontal, horizontal])
@@ -93,7 +93,7 @@ class DemoMetricTests(unittest.TestCase):
         np.testing.assert_allclose(component_pair_matrix(x, y, spec, weights), expected)
         result = evaluate_pairs(x, y, spec, weights=weights)
         self.assertAlmostEqual(result["mismatch_reward"], 0.7)
-        self.assertAlmostEqual(result["squared_distance_reward"], 18.8)
+        self.assertAlmostEqual(result["squared_distance_reward"], 2.8)
         self.assertEqual(result["x_off_support_mass"], 0)
         self.assertEqual(result["y_off_support_mass"], 0)
         np.testing.assert_allclose(component_frequencies(x, spec, weights=weights), [0.5, 0.5])

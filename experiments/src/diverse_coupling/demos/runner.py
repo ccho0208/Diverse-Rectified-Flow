@@ -104,7 +104,9 @@ def run_experiment(config: DemoConfig, name: str, output: Path, *, resume: bool 
     output.mkdir(parents=True, exist_ok=True)
     seed = config.seed + {"gmm8": 0, "two_disks": 10000, "rings": 20000}[name]
     rng_data, rng_pool, rng_eval, rng_iid, rng_display, rng_joint, rng_transport, _ = _random_sources(seed)
-    shared_marginal = name != "two_disks"
+    disk_setup = name == "two_disks"
+    marginal_source = spec.source_distribution()
+    joint_source = spec.source_distribution(copies=2)
 
     def flow(model, points, *, record=False, reverse=False):
         if stop_requested is not None and stop_requested():
@@ -114,25 +116,31 @@ def run_experiment(config: DemoConfig, name: str, output: Path, *, resume: bool 
     dataset_path = output / "datasets.npz"
     if resume and dataset_path.exists():
         data = _archive(dataset_path)
+        if disk_setup and "marginal_sources" not in data:
+            raise ValueError("old two_disks Gaussian-source setup cannot be resumed; choose a new run directory")
     else:
         target_x, labels_x = spec.sample(config.marginal_samples, rng_data, side="x")
-        target_y, labels_y = (target_x.copy(), labels_x.copy()) if shared_marginal else spec.sample(
-            config.marginal_samples, rng_data, side="y")
+        target_y, labels_y = target_x.copy(), labels_x.copy()
         reference_x, _ = spec.sample(config.evaluation_samples, rng_eval, side="x")
         reference_y, _ = spec.sample(config.evaluation_samples, rng_eval, side="y")
         data = {"target_x": target_x, "target_y": target_y,
                 "target_labels_x": labels_x, "target_labels_y": labels_y,
                 "reference_x": reference_x, "reference_y": reference_y,
-                "pool_noise": rng_pool.standard_normal((config.training_samples, 2)),
-                "joint_noise": rng_joint.standard_normal((config.evaluation_samples, 4))}
+                "pool_noise": marginal_source.sample_numpy(config.training_samples, 2, rng_pool),
+                "joint_noise": joint_source.sample_numpy(config.evaluation_samples, 4, rng_joint)}
+        if disk_setup:
+            data["marginal_sources"], _ = spec.sample(config.marginal_samples, rng_data, side="source")
+            data["source_reference"], _ = spec.sample(config.evaluation_samples, rng_eval, side="source")
         _npz(dataset_path, **data)
     _json(output / "config.json", {"experiment": spec.to_dict(), "run": config.to_dict()})
 
-    def train(role, targets, epochs, role_seed, *, masses=None, source_points=None):
+    def train(role, targets, epochs, role_seed, *, masses=None, source_points=None,
+              source_distribution=None):
         folder = output / role
         return train_flow(
             targets, _train_config(config, epochs, role_seed), output_dir=folder,
-            masses=masses, source_points=source_points, hidden_sizes=config.hidden_sizes,
+            masses=masses, source_points=source_points, source_distribution=source_distribution,
+            hidden_sizes=config.hidden_sizes,
             resume=resume and (folder / "checkpoint.pt").exists(),
             metadata={"experiment": spec.to_dict(), "role": role,
                       "reward": config.reward, "shared_unconstrained_architecture": True},
@@ -140,9 +148,10 @@ def run_experiment(config: DemoConfig, name: str, output: Path, *, resume: bool 
             stop_requested=stop_requested)
 
     print(json.dumps({"experiment": name, "stage": "marginal_training"}), flush=True)
-    model_x = train("marginal_x", data["target_x"], config.marginal_epochs, seed + 1)
-    model_y = model_x if shared_marginal else train(
-        "marginal_y", data["target_y"], config.marginal_epochs, seed + 2)
+    model_x = train("marginal_x", data["target_x"], config.marginal_epochs, seed + 1,
+                    source_points=data.get("marginal_sources"))
+    model_y = model_x
+    antithetic_noise = marginal_source.antithetic(data["pool_noise"])
 
     if stop_requested is not None and stop_requested():
         raise InterruptedError("stop requested; marginal checkpoints saved")
@@ -156,7 +165,7 @@ def run_experiment(config: DemoConfig, name: str, output: Path, *, resume: bool 
         X, Y = cached_pool["X"], cached_pool["Y"]
     else:
         X = flow(model_x, data["pool_noise"]).endpoints
-        Y = flow(model_y, -data["pool_noise"]).endpoints
+        Y = flow(model_y, antithetic_noise).endpoints
         if cached_pool is not None and (output / "joint").exists():
             # Extended marginal training changes the joint training measure.
             # Preserve the previous joint model before starting a fresh one.
@@ -172,13 +181,14 @@ def run_experiment(config: DemoConfig, name: str, output: Path, *, resume: bool 
     plan.save(output / "plan.npz")
     np.save(output / "C.npy", C, allow_pickle=False)
     _npz(output / "pool.npz", X=X, Y=Y, x_labels=x_labels, y_labels=y_labels,
-         noise_x=data["pool_noise"], noise_y=-data["pool_noise"],
+         noise_x=data["pool_noise"], noise_y=antithetic_noise,
          x_ids=np.arange(len(X)), y_ids=np.arange(len(Y)),
          model_x_identity=np.asarray(identities[0]), model_y_identity=np.asarray(identities[1]))
     joint_targets = np.concatenate((X[plan.row_indices], Y[plan.column_indices]), axis=1)
     print(json.dumps({"experiment": name, "stage": "coupling", "reward": plan.reward,
                       "solver": plan.solver, "nonzero_pairs": len(plan.masses)}), flush=True)
-    joint = train("joint", joint_targets, config.joint_epochs, seed + 3, masses=plan.masses)
+    joint = train("joint", joint_targets, config.joint_epochs, seed + 3, masses=plan.masses,
+                  source_distribution=joint_source)
     if stop_requested is not None and stop_requested():
         raise InterruptedError("stop requested; joint checkpoint saved")
     sampled = flow(joint, data["joint_noise"]).endpoints
@@ -209,14 +219,18 @@ def run_experiment(config: DemoConfig, name: str, output: Path, *, resume: bool 
 
     transport_model = None
     ordinary_path = None
+    ordinary_metrics = None
     if name == "two_disks" and config.ordinary_transport:
-        source, _ = spec.sample(config.training_samples, rng_transport, side="x")
-        target, _ = spec.sample(config.training_samples, rng_transport, side="y")
-        transport_model = train("ordinary_transport", target, config.transport_epochs,
-                                seed + 4, source_points=source)
-        transport_source, _ = spec.sample(config.evaluation_samples, rng_transport, side="x")
+        # The frozen marginal is itself the conventional left-to-right RF.
+        # Reuse it so the picture and the endpoint experiment use exactly F.
+        source = data["marginal_sources"]
+        target = data["target_x"]
+        transport_model = model_x
+        transport_source, _ = spec.sample(config.evaluation_samples, rng_transport, side="source")
         transported = flow(transport_model, transport_source).endpoints
-        methods["ordinary_transport"] = evaluate_pairs(transport_source, transported, spec, **reference)
+        ordinary_metrics = evaluate_pairs(
+            transport_source, transported, spec, x_side="source",
+            reference_X=data["source_reference"], reference_Y=data["reference_y"], seed=seed + 55)
 
     # Display a fixed subset. Inverse paths use the frozen marginal models, and
     # are distinct from the independent 4D source of the joint model.
@@ -230,7 +244,6 @@ def run_experiment(config: DemoConfig, name: str, output: Path, *, resume: bool 
     }
     if transport_model is not None:
         ordinary_result = flow(transport_model, source[:count], record=True)
-        display_outputs["ordinary_transport"] = (source[:count], ordinary_result.endpoints)
         ordinary_path = ordinary_result.trajectory
     frames = np.linspace(0, config.ode_steps, config.display_frames, dtype=int)
     names = list(display_outputs)
@@ -263,8 +276,9 @@ def run_experiment(config: DemoConfig, name: str, output: Path, *, resume: bool 
          pair_ids=np.arange(len(generated_x)))
     times = np.linspace(0, 1, config.ode_steps + 1)[frames]
     bounds = np.asarray(spec.bounds(), dtype=np.float64)
-    bounds[[0, 2]] = np.minimum(bounds[[0, 2]], -3.5)
-    bounds[[1, 3]] = np.maximum(bounds[[1, 3]], 3.5)
+    if not disk_setup:
+        bounds[[0, 2]] = np.minimum(bounds[[0, 2]], -3.5)
+        bounds[[1, 3]] = np.maximum(bounds[[1, 3]], 3.5)
     field_x = velocity_grid(model_x, bounds, times, grid_size=config.grid_size, device=config.device)
     field_y = velocity_grid(model_y, bounds, times, grid_size=config.grid_size, device=config.device)
     joint_path = flow(joint, data["joint_noise"][:count], record=True).trajectory[frames]
@@ -286,6 +300,8 @@ def run_experiment(config: DemoConfig, name: str, output: Path, *, resume: bool 
         display["ordinary_linear_path"] = (
             (1 - times[:, None, None]) * source[:count]
             + times[:, None, None] * target[:count])
+    if disk_setup:
+        display["source_reference"] = data["source_reference"][:512]
     _npz(output / "display.npz", **display)
     _npz(output / "reverse_mapping.npz", method_names=display["method_names"],
          noise_x=display["noise_x"], noise_y=display["noise_y"],
@@ -307,6 +323,17 @@ def run_experiment(config: DemoConfig, name: str, output: Path, *, resume: bool 
                   "Reverse noise is the inverse of each frozen 2D marginal flow, distinct from initial 4D joint noise."],
         "duration_seconds": time.monotonic() - started,
     }
+    report["flow_setup"] = {
+        "marginal_source": marginal_source.to_dict(), "joint_source": joint_source.to_dict(),
+        "shared_marginal": True, "coupling_space": "two target-distribution endpoints",
+        "antithetic_transform": "(-4 - x, -y)" if disk_setup else "-z",
+    }
+    if ordinary_metrics is not None:
+        report["ordinary_transport"] = ordinary_metrics
+    if disk_setup:
+        report["reverse_source"] = evaluate_pairs(
+            learned_noise_x, learned_noise_y, spec, x_side="source", y_side="source",
+            reference_X=data["source_reference"], reference_Y=data["source_reference"], seed=seed + 56)
     _json(output / "report.json", report)
     render_demo(output, title={"gmm8": "Eight Gaussian components", "two_disks": "Two uniform disks",
                                "rings": f"{spec.components} concentric rings"}[name])
@@ -325,9 +352,14 @@ def run_demos(config: DemoConfig, output: str | Path, *, resume: bool = False) -
     output = Path(output)
     output.mkdir(parents=True, exist_ok=True)
     old_path = output / "config.json"
+    setup_path = output / "setup.json"
     if old_path.exists():
         if not resume:
             raise ValueError("run already exists; use --resume or choose a new output directory")
+        if "two_disks" in config.experiments:
+            setup = json.loads(setup_path.read_text()) if setup_path.exists() else {}
+            if setup.get("two_disks") != "left_disks_to_right_disks_v2":
+                raise ValueError("old two_disks Gaussian-source setup cannot be resumed; choose a new run directory")
         previous = json.loads(old_path.read_text())
         changeable = {"marginal_epochs", "joint_epochs", "transport_epochs", "device", "cpu_threads"}
         for key, value in config.to_dict().items():
@@ -336,6 +368,8 @@ def run_demos(config: DemoConfig, output: str | Path, *, resume: bool = False) -
     elif any(output.iterdir()):
         raise ValueError("output must be empty unless resuming an existing demo run")
     _json(old_path, config.to_dict())
+    _json(setup_path, {name: "left_disks_to_right_disks_v2" if name == "two_disks" else "gaussian_source_v1"
+                       for name in config.experiments})
     environment = {
         "time_utc": datetime.now(timezone.utc).isoformat(), "python": platform.python_version(),
         "platform": platform.platform(), "machine": platform.machine(), "numpy": np.__version__,

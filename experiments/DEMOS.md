@@ -28,8 +28,8 @@ PYTHONPATH=src python3 -m diverse_coupling.demos run \
 
 The main configuration uses 2,048 empirical pairs, 4,096 fixed marginal
 training targets, and 10,000 generated evaluation pairs. It trains each
-marginal for 3,000 full-plan optimizer steps and each joint model for 5,000;
-the conventional disk transport comparison uses 3,000. These are starting
+marginal for 3,000 full-plan optimizer steps and each joint model for 5,000.
+The conventional disk picture reuses the frozen marginal flow. These are starting
 settings; inspect marginal fidelity, support leakage, and reverse-integration
 error before interpreting diversity scores.
 
@@ -50,7 +50,7 @@ the presence of GPU-aware code.
 | Name | Distribution |
 | --- | --- |
 | `gmm8` | Eight equal Gaussian components at radius 3, isotropic standard deviation 0.15. Both marginals coincide. |
-| `two_disks` | Uniform filled disks of radius 0.3. X centers are (-2,1), (-2,-1); Y centers are (2,1), (2,-1). Equal component weights. |
+| `two_disks` | Source: uniform filled disks at (-2,1), (-2,-1). Target: disks at (2,1), (2,-1). Both coupled endpoints X and Y have the right-disk target distribution. Radius 0.3 and equal component weights throughout. |
 | `rings` | Two equal annuli with radius uniform in 1±0.08 or 3±0.08, and uniform angle. Both marginals coincide. |
 
 The disk sampler uses radius `0.3 * sqrt(U)` to obtain uniform area density.
@@ -73,28 +73,44 @@ requires a separate multi-marginal optimization and model extension.
 
 ## Couplings and measurements
 
-First train and freeze the marginal flows F_X and F_Y. Identical marginals share
-one model. Draw stored Gaussian inputs z_i and form common endpoint pools
-`X_i=F_X(z_i)`, `Y_i=F_Y(-z_i)`. All empirical baselines use these exact pools:
+First train and freeze a shared marginal flow F. For GMM and rings, it maps a
+standard Gaussian to the target, and the stored endpoint pools are
+`X_i=F(z_i)`, `Y_i=F(-z_i)`.
+
+For the disk experiment, F maps the left-disk mixture to the right-disk mixture.
+Its training source/target observations are independently paired and fixed.
+Draw `z_i` from the left disks and use the measure-preserving reflection
+`A(z)=(-4-z[0], -z[1])` around (-2,0). Form `X_i=F(z_i)` and `Y_i=F(A(z_i))`.
+Both endpoint pools are on the right; the optimization couples two target
+outputs, not a left observation with a right observation. All empirical
+baselines use these exact pools:
 
 - **Antithetic:** original identity pairing, with masses 1/n.
 - **Independent:** empirical product measure, with exact expected reward and
   component table calculated without sampling pair identities.
 - **Empirical optimum:** globally maximize C using the assignment solver, then
   train the 4D joint RF on the fixed paired targets with their plan masses.
-- **Learned:** new Gaussian-to-joint samples from the trained 4D model, evaluated
-  against independent target-distribution references.
+- **Learned:** new samples from the trained 4D model, evaluated against
+  independent target-distribution references. Its source is the product of
+  two independent left-disk mixtures for disks, or a standard 4D Gaussian for
+  GMM and rings. Each training step draws fresh independent source samples
+  while visiting every fixed P-weighted endpoint pair; it never resamples P.
 
 The default reward is component mismatch. Change JSON `reward` to
 `squared_distance` for a separate objective. JSON `use_permutation=false`
 selects the transportation LP backend; this can be much larger than assignment
 and remains restricted to equal counts and uniform empirical weights.
 
-The two-disk experiment also trains an ordinary 2D left-to-right RF from fixed
-independently paired disk observations. `ordinary_transport.png` compares their
+The two-disk experiment's marginal is itself an ordinary 2D left-to-right RF.
+`ordinary_transport.png` compares its independently paired training observations'
 straight interpolations with ODE trajectories starting from the same source
-points. This RF can change its induced endpoint coupling. The 4D generator
-learns the pair distribution instead.
+points using that same frozen model. This RF can change its induced endpoint
+coupling. Its source-to-target diagnostics are stored separately under
+`report.json`'s `ordinary_transport`, since they describe a different coupling
+from the target-to-target diversity experiment. `ordinary_transport=false`
+disables that additional picture and diagnostics; it does not change F.
+`transport_epochs` remains accepted for compatibility with old configurations,
+but marginal training is governed by `marginal_epochs`.
 
 Reports include component mismatch, squared separation, component-pair
 probabilities, marginal component frequencies, compact-support leakage, and
@@ -108,8 +124,11 @@ generated marginals mean that difference is not an optimality certificate.
 ## Reverse mapping and velocity displays
 
 Every generated pair is mapped backward through the frozen 2D marginals.
-These paired marginal noise coordinates are distinct from the independent 4D
-Gaussian source used to generate the joint sample. A forward reconstruction
+For disks, both inverse coordinates are in the left-disk source space; the
+display explicitly identifies the left source and right target. For GMM and
+rings, inverse coordinates are in Gaussian source space. These paired marginal
+source coordinates differ from the independent 4D source used to generate the
+joint sample. A forward reconstruction
 measures the inverse mapping's numerical error.
 
 For a fixed display subset, reverse paths are saved and reordered into forward
@@ -127,7 +146,7 @@ Each experiment directory contains:
 | `marginal_x/`, `marginal_y/` | Frozen 2D flow checkpoints and loss histories; identical marginals share X's model. |
 | `pool.npz`, `C.npy`, `plan.npz` | Fixed empirical endpoints, IDs, source positions, reward matrix, and probability plan. |
 | `joint/` | 4D model checkpoint and weighted training history. |
-| `ordinary_transport/` | Conventional disk RF checkpoint, when enabled. |
+| `marginal_x/` (disks) | The shared left-to-right RF, also used for the conventional picture. No separate Gaussian-to-disk or ordinary-transport model is trained. |
 | `samples.npz` | Generated paired outputs, pair IDs, original 4D noise, and reverse-mapped 2D marginal noise for all pairs. |
 | `reverse_mapping.npz` | Full generated marginal noise pairs and the colored display subset's reverse paths. |
 | `display.npz` | Marginal fields, sampled paths, pairing matrices, and display points. |
@@ -163,6 +182,15 @@ preserved when the frozen marginal weights are unchanged. Epoch limits may be
 extended; if marginal weights change, the old joint model is preserved under
 `previous_joint_models/` before training a new joint model on the new endpoints.
 Other data/optimization settings require a new run directory.
+
+Disk runs created before the left-disk source correction cannot be resumed.
+The runner checks `setup.json` before modifying an existing run and rejects
+the old Gaussian-source setup. Preserve those results and use a fresh directory:
+
+```bash
+PYTHONPATH=src python3 -m diverse_coupling.demos run \
+  --config configs/demo_two_disks.json --output runs/two-disks-left-source --device cuda
+```
 
 ## Verification
 

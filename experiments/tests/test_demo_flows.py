@@ -13,6 +13,7 @@ from diverse_coupling.demos.flows import (
     FlowTrainingConfig, integrate, load_flow, round_trip, train_flow, velocity_grid,
 )
 from diverse_coupling.models import RectifiedFlowAdapter
+from diverse_coupling.demos.sources import SourceDistribution
 
 
 class DemoFlowTests(unittest.TestCase):
@@ -111,6 +112,43 @@ class DemoFlowTests(unittest.TestCase):
                                        rtol=1e-12, atol=1e-12)
             for a, b in zip(full.parameters(), chunked.parameters()):
                 torch.testing.assert_close(a, b, rtol=1e-12, atol=1e-12)
+
+    def test_disk_source_full_weighted_objective_matches_explicit_step(self):
+        source = SourceDistribution("uniform_disks", ((-2., 1.), (-2., -1.)), copies=2)
+        targets = np.array([[2., 1., 2., -1.], [2., -1., 2., 1.], [2., 1., 2., 1.]])
+        masses = np.array([.2, .3, .5])
+        config = FlowTrainingConfig(epochs=1, seed=7, dtype="float64", chunk_size=2)
+        generator = torch.Generator().manual_seed(7)
+        noise = source.sample_torch(3, 4, generator=generator, device=torch.device("cpu"), dtype=torch.float64)
+        times = torch.rand(3, generator=generator, dtype=torch.float64)
+        reference = RectifiedFlowAdapter(4, (5,), seed=7).double()
+        loss = (reference.per_example_loss(torch.tensor(targets), noise=noise, times=times) * torch.tensor(masses)).sum()
+        optimizer = torch.optim.Adam(reference.parameters(), lr=config.learning_rate)
+        loss.backward()
+        optimizer.step()
+        with tempfile.TemporaryDirectory() as temporary:
+            trained = train_flow(targets, config, output_dir=temporary, masses=masses,
+                                 source_distribution=source, hidden_sizes=(5,))
+            for actual, expected in zip(trained.parameters(), reference.parameters()):
+                torch.testing.assert_close(actual, expected, rtol=1e-12, atol=1e-12)
+            with self.assertRaisesRegex(ValueError, "data identity"):
+                train_flow(targets, config, output_dir=temporary, masses=masses,
+                           source_distribution=SourceDistribution(), hidden_sizes=(5,), resume=True)
+
+    def test_disk_source_area_density_product_law_and_antithetic_reflection(self):
+        source = SourceDistribution("uniform_disks", ((-2., 1.), (-2., -1.)), copies=2)
+        generator = torch.Generator().manual_seed(31)
+        points = source.sample_torch(50_000, 4, generator=generator,
+                                    device=torch.device("cpu"), dtype=torch.float64).numpy()
+        blocks = points.reshape(-1, 2)
+        centers = np.column_stack((np.full(len(blocks), -2.), np.where(blocks[:, 1] > 0, 1., -1.)))
+        squared = np.sum((blocks - centers)**2, axis=1)
+        self.assertLessEqual(squared.max(), .3**2)
+        self.assertAlmostEqual(squared.mean(), .3**2 / 2, delta=.0003)
+        self.assertAlmostEqual(np.mean((points[:, 1] > 0) != (points[:, 3] > 0)), .5, delta=.01)
+        reflected = source.antithetic(points)
+        np.testing.assert_allclose(source.antithetic(reflected), points, atol=1e-15)
+        np.testing.assert_allclose(reflected, [-4., 0., -4., 0.] - points)
 
     def test_resume_matches_uninterrupted_training_and_rejects_changed_data(self):
         targets = np.array([[1., 2.], [3., -4.], [-2., 0.]])

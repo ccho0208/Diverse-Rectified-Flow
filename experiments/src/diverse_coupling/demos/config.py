@@ -18,7 +18,7 @@ class DemoConfig:
     evaluation_samples: int = 10000
     marginal_epochs: int = 3000
     joint_epochs: int = 5000
-    transport_epochs: int = 3000
+    transport_epochs: int = 3000  # Legacy setting; the disk comparison now reuses the marginal model.
     hidden_sizes: tuple[int, ...] = (64, 64, 64)
     learning_rate: float = 1e-3
     chunk_size: int = 2048

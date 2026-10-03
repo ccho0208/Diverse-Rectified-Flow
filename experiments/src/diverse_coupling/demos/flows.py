@@ -20,6 +20,7 @@ import torch
 from torch import nn
 
 from ..models import RectifiedFlowAdapter
+from .sources import SourceDistribution
 
 
 @dataclass(frozen=True)
@@ -140,11 +141,12 @@ def load_flow(checkpoint: str | Path, device: str = "cpu") -> tuple[RectifiedFlo
 def train_flow(
     targets: np.ndarray, config: FlowTrainingConfig, *, output_dir: str | Path,
     source_points: np.ndarray | None = None, masses: np.ndarray | None = None,
+    source_distribution: SourceDistribution | None = None,
     hidden_sizes: Sequence[int] = (64, 64, 64), resume: bool = False,
     metadata: dict | None = None, progress: Callable[[dict], None] | None = None,
     stop_requested: Callable[[], bool] | None = None,
 ) -> RectifiedFlowAdapter:
-    """Train a Gaussian-to-target or fixed-source-to-target straight-path RF.
+    """Train a sampled-source-to-target or fixed-source-to-target RF.
 
     One epoch is one globally mass-weighted optimizer step. Chunk losses are
     summed without local renormalization, and pair identities are never drawn.
@@ -157,9 +159,13 @@ def train_flow(
     config.validate()
     target_array = _points(targets, "targets")
     source_array = None if source_points is None else _points(source_points, "source_points")
+    if source_array is not None and source_distribution is not None:
+        raise ValueError("use source_points or source_distribution, not both")
+    distribution = source_distribution or SourceDistribution()
     if source_array is not None and source_array.shape != target_array.shape:
         raise ValueError("source_points must have the same shape as targets")
     size, dimensions = target_array.shape
+    distribution.validate(dimensions)
     mass_array = (np.full(size, 1 / size, dtype=np.float64) if masses is None
                   else np.asarray(masses, dtype=np.float64))
     if mass_array.shape != (size,) or not np.isfinite(mass_array).all() or (mass_array < 0).any():
@@ -168,6 +174,8 @@ def train_flow(
         raise ValueError("masses must sum to one")
     metadata = {} if metadata is None else json.loads(json.dumps(metadata, allow_nan=False))
     identity = _data_identity(target_array, mass_array, source_array)
+    if source_array is None and distribution.kind != "normal":
+        identity = hashlib.sha256((identity + json.dumps(distribution.to_dict(), sort_keys=True)).encode()).hexdigest()
     folder = Path(output_dir)
     folder.mkdir(parents=True, exist_ok=True)
     checkpoint = folder / "checkpoint.pt"
@@ -219,7 +227,8 @@ def train_flow(
             "model_config": model.export_config(), "model_state": model.state_dict(),
             "optimizer_state": optimizer.state_dict(), "train_config": config.to_dict(),
             "completed_epochs": len(history), "history": history, "metadata": metadata,
-            "data_identity": identity, "source_kind": "normal" if source_tensor is None else "fixed",
+            "data_identity": identity, "source_kind": distribution.kind if source_tensor is None else "fixed",
+            "source_distribution": distribution.to_dict() if source_tensor is None else None,
             "sample_count": size, "rng_device_type": rng_device.type,
             "rng_state": generator.get_state().cpu(), "rng_policy": "seed_plus_zero_based_epoch",
         }
@@ -229,8 +238,8 @@ def train_flow(
     for epoch in range(len(history) + 1, config.epochs + 1):
         generator.manual_seed((config.seed + epoch - 1) % (2**63 - 1))
         if source_tensor is None:
-            sources = torch.randn((size, dimensions), device=rng_device, dtype=dtype,
-                                  generator=generator).to(device)
+            sources = distribution.sample_torch(size, dimensions, device=rng_device, dtype=dtype,
+                                                generator=generator).to(device)
         else:
             sources = source_tensor
         times = torch.rand(size, device=rng_device, dtype=dtype, generator=generator).to(device)

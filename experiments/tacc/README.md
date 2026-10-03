@@ -47,7 +47,8 @@ export DIVERSE_ENV="$SCRATCH/diverse-demo-env"
 sbatch -A YOUR_ALLOCATION tacc/vista_gh_dev.slurm
 ```
 
-The allocation is a placeholder to replace, not a value stored in the script.
+Omit `-A YOUR_ALLOCATION` to use your configured default account. The allocation
+is an optional placeholder to replace, not a value stored in the script.
 The default configuration is `configs/demo_default.json`. Results go to
 `$SCRATCH/diverse-coupling/<job-id>/`; console logs appear in the submission
 directory as `diverse-demo-<job-id>.out` and `.err`.
@@ -64,6 +65,18 @@ sbatch -A YOUR_ALLOCATION tacc/vista_gh_dev.slurm
 ```
 
 ## Resume an interrupted run
+
+The corrected two-disk experiment uses left disks as its source and couples
+two outputs on the right. Old Gaussian-source disk checkpoints are incompatible.
+Rerun only the disks in a new directory (the GMM and rings setup is unchanged):
+
+```bash
+export DIVERSE_ENV="$SCRATCH/diverse-demo-env"
+export DIVERSE_CONFIG="configs/demo_two_disks.json"
+export DIVERSE_RUN_DIR="$SCRATCH/diverse-coupling/two-disks-left-source-seed0"
+unset DIVERSE_RESUME
+sbatch tacc/vista_gh_dev.slurm
+```
 
 Reuse both the run directory and its configuration:
 

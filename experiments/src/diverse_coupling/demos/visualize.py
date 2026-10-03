@@ -91,7 +91,7 @@ def _load_display(path: Path) -> dict[str, np.ndarray]:
                 raise ValueError(f"{key} must contain finite numeric values")
         if not np.allclose(linear[0], data["ordinary_path"][0], rtol=1e-5, atol=1e-6):
             raise ValueError("Ordinary interpolation and ODE paths must have the same starting points")
-    for key in ("reference_x", "reference_y"):
+    for key in ("reference_x", "reference_y", "source_reference"):
         if key in data:
             values = data[key]
             if values.ndim != 2 or values.shape[1] != 2 or not len(values):
@@ -142,8 +142,9 @@ def _figures(output_dir: Path, data: dict[str, np.ndarray], report: dict[str, An
         ax.scatter(x[:, 0], x[:, 1], c=colors, s=24, marker="o", label="X", edgecolors="none", zorder=3)
         ax.scatter(y[:, 0], y[:, 1], edgecolors=colors, facecolors="none", s=36, marker="^", linewidths=1.2, label="Y", zorder=3)
 
-    def reference(ax):
-        for key in ("reference_x", "reference_y"):
+    def reference(ax, *, include_source=False):
+        for key in (("source_reference", "reference_x", "reference_y") if include_source
+                    else ("reference_x", "reference_y")):
             if key in data:
                 points = data[key]
                 ax.scatter(points[:, 0], points[:, 1], color="#8995a6", s=5, alpha=0.13, edgecolors="none", zorder=1)
@@ -155,10 +156,16 @@ def _figures(output_dir: Path, data: dict[str, np.ndarray], report: dict[str, An
     pairs(axes[0, 0], data["output_x"][method], data["output_y"][method])
     axes[0, 0].legend(loc="upper right", fontsize=9)
     noise_bounds = _point_bounds(data["noise_x"], data["noise_y"])
-    configure(axes[0, 1], noise_bounds, "Marginal noise: inverse of frozen 2D flows")
+    disk_source = "source_reference" in data
+    configure(axes[0, 1], noise_bounds, "Left-disk source: inverse of shared flow" if disk_source
+              else "Marginal noise: inverse of frozen 2D flows")
+    if disk_source:
+        points = data["source_reference"]
+        axes[0, 1].scatter(points[:, 0], points[:, 1], color="#8995a6", s=5, alpha=.13)
     pairs(axes[0, 1], data["noise_x"][method], data["noise_y"][method])
     for ax, side in zip(axes[1], ("x", "y")):
         configure(ax, data["bounds"], f"Frozen {side.upper()} marginal velocity, t = {time:.2f}")
+        reference(ax, include_source=True)
         points, field = data["field_points"], data[f"field_{side}"][step]
         norms = np.linalg.norm(data[f"field_{side}"], axis=-1)
         span = max(np.diff(data["bounds"].reshape(2, 2), axis=1).ravel())
@@ -212,7 +219,7 @@ def _figures(output_dir: Path, data: dict[str, np.ndarray], report: dict[str, An
             ("Paired target Y", "ODE endpoint"),
         ):
             configure(ax, bounds, subtitle)
-            reference(ax)
+            reference(ax, include_source=True)
             for index in range(min(paths.shape[1], 48)):
                 ax.plot(paths[:, index, 0], paths[:, index, 1], color=ordinary_colors[index], alpha=0.65, linewidth=1.2)
             ax.scatter(paths[0, :, 0], paths[0, :, 1], c=ordinary_colors, s=20, marker="o", edgecolors="none", label="Source X", zorder=3)
@@ -232,13 +239,13 @@ _HTML = r"""<!doctype html>
 <style>
 :root{font-family:system-ui,-apple-system,sans-serif;color:#17233a;background:#f2f5f8}*{box-sizing:border-box}body{margin:0;padding:24px}main{max-width:1220px;margin:auto}h1{font-size:25px;margin:0 0 8px}p{line-height:1.5}header p{margin:0 0 18px;color:#526279}.controls{display:flex;align-items:center;gap:16px;flex-wrap:wrap;background:white;border:1px solid #dbe2ec;border-radius:10px;padding:14px;margin-bottom:18px}select,button{font:inherit;background:white;border:1px solid #aab8c9;border-radius:6px;padding:7px}input[type=range]{width:260px;vertical-align:middle;accent-color:#326fae}.grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}.panel{background:white;border:1px solid #dbe2ec;border-radius:10px;padding:15px;min-width:0}h2{font-size:16px;margin:0 0 8px}canvas{display:block;width:100%;height:auto}.caption{font-size:13px;color:#526279;margin:8px 0 0}.diagnostics{margin-top:16px;display:grid;grid-template-columns:1fr 1fr;gap:16px}table{border-collapse:collapse;font-size:13px;width:100%}th,td{text-align:right;padding:8px;border-bottom:1px solid #e2e7ee}th:first-child,td:first-child{text-align:left}.selected{background:#edf4fb}.legend{font-size:13px;color:#526279;margin-bottom:16px}.heatmap{display:grid;gap:2px;max-width:340px}.cell{padding:8px;text-align:center;font-size:12px}.metrics{font-size:13px;color:#526279;line-height:1.6}footer{font-size:12px;color:#526279;margin:20px 0}@media(max-width:760px){body{padding:12px}.grid,.diagnostics{grid-template-columns:1fr}input[type=range]{width:180px}}
 </style></head><body><main>
-<header><h1>__TITLE__</h1><p>Compare empirical couplings and the learned joint generator through the same frozen marginal flows.</p></header>
+<header><h1>__TITLE__</h1><p>Compare empirical couplings and the learned joint generator through the same frozen marginal flows. __SETUP_DESCRIPTION__</p></header>
 <div class="controls"><label>Coupling <select id="method" aria-label="Coupling method"></select></label><label>Marginal flow time <input id="time" type="range" min="0" max="__MAX_TIME__" value="__MID_TIME__" step="1" aria-label="Marginal flow time"> <output id="timeLabel"></output></label><button id="play" type="button">Play</button></div>
 <div class="legend">● X &nbsp; △ Y &nbsp; ··· dashed line: paired observations &nbsp; · same color: the same pair across panels</div>
 <div class="grid">
 <section class="panel"><h2>Coupled outputs</h2><canvas id="outputs" width="560" height="450" aria-label="Coupled outputs in data coordinates"></canvas><p class="caption">Endpoint connections show the selected coupling; they are not ODE trajectories.</p></section>
-<section class="panel"><h2>Reverse-mapped marginal noise</h2><canvas id="noise" width="560" height="450" aria-label="Marginal noise, inverse of frozen 2D flow"></canvas><p class="caption">Marginal noise (inverse of frozen 2D flow). These coordinates differ from the independent 4D source of the joint generator.</p></section>
-<section class="panel"><h2>X marginal velocity and trajectories</h2><canvas id="fieldX" width="560" height="450" aria-label="Frozen X marginal velocity field"></canvas><p class="caption">Actual frozen 2D marginal velocity. Paths run from marginal noise toward outputs; arrows use a fixed scale across time.</p></section>
+<section class="panel"><h2>Reverse-mapped marginal source</h2><canvas id="noise" width="560" height="450" aria-label="Marginal source, inverse of frozen 2D flow"></canvas><p class="caption">Marginal source (inverse of frozen 2D flow). These coordinates differ from the independent 4D source of the joint generator.</p></section>
+<section class="panel"><h2>X marginal velocity and trajectories</h2><canvas id="fieldX" width="560" height="450" aria-label="Frozen X marginal velocity field"></canvas><p class="caption">Actual frozen 2D marginal velocity. Paths run from the source toward outputs; arrows use a fixed scale across time.</p></section>
 <section class="panel"><h2>Y marginal velocity and trajectories</h2><canvas id="fieldY" width="560" height="450" aria-label="Frozen Y marginal velocity field"></canvas><p class="caption">The same pair colors are retained through reverse mapping and marginal trajectories.</p></section>
 </div>
 <div class="diagnostics"><section class="panel"><h2>Component pairing</h2><p class="caption">Rows: X component. Columns: Y component. Cell values are joint probabilities.</p><div id="heatmap" class="heatmap"></div></section><section class="panel"><h2>All-pair evaluation</h2><div id="scores" style="overflow-x:auto"></div><p class="caption">SW: sliced Wasserstein marginal discrepancy, approximated with random projections; lower is better. Off support: fraction outside the target support.</p><p id="roundTrip" class="metrics"></p><p class="caption">Plots show a fixed subset. Metrics use the full evaluation population, when provided in the report.</p></section></div>
@@ -276,11 +283,12 @@ function marker(ctx,p,color,triangle=false,size=4){
 }
 function pairs(canvas,x,y,bounds,showReference=false){
  const {ctx,point}=layout(canvas,bounds);
- if(showReference){ctx.fillStyle="#8995a6";ctx.globalAlpha=.16;for(const key of ["reference_x","reference_y"]){for(const p of data[key]??[]){const q=point(p);ctx.beginPath();ctx.arc(q[0],q[1],1.5,0,Math.PI*2);ctx.fill();}}ctx.globalAlpha=1;}
+ if(showReference){ctx.fillStyle="#8995a6";ctx.globalAlpha=.16;for(const key of (showReference==="source"?["source_reference"]:["reference_x","reference_y"])){for(const p of data[key]??[]){const q=point(p);ctx.beginPath();ctx.arc(q[0],q[1],1.5,0,Math.PI*2);ctx.fill();}}ctx.globalAlpha=1;}
  x.forEach((p,i)=>{const a=point(p),b=point(y[i]);ctx.strokeStyle=colors[i];ctx.globalAlpha=.38;ctx.lineWidth=1;ctx.setLineDash([4,4]);ctx.beginPath();ctx.moveTo(...a);ctx.lineTo(...b);ctx.stroke();ctx.setLineDash([]);ctx.globalAlpha=1;marker(ctx,a,colors[i]);marker(ctx,b,colors[i],true);});
 }
 function field(canvas,side,m,t){
  const {ctx,point,scale}=layout(canvas,data.bounds),values=data["field_"+side][t];
+ ctx.fillStyle="#8995a6";ctx.globalAlpha=.16;for(const key of ["source_reference","reference_x","reference_y"]){for(const p of data[key]??[]){const q=point(p);ctx.beginPath();ctx.arc(q[0],q[1],1.5,0,Math.PI*2);ctx.fill();}}ctx.globalAlpha=1;
  values.forEach((v,i)=>{const a=point(data.field_points[i]),vx=v[0]*scale/data.field_scale[side],vy=-v[1]*scale/data.field_scale[side],b=[a[0]+vx,a[1]+vy],angle=Math.atan2(vy,vx);
   ctx.strokeStyle="#536983";ctx.globalAlpha=.7;ctx.lineWidth=1;ctx.beginPath();ctx.moveTo(...a);ctx.lineTo(...b);if(Math.hypot(vx,vy)>1){ctx.moveTo(b[0]-4*Math.cos(angle-.5),b[1]-4*Math.sin(angle-.5));ctx.lineTo(...b);ctx.lineTo(b[0]-4*Math.cos(angle+.5),b[1]-4*Math.sin(angle+.5));}ctx.stroke();
  });
@@ -296,7 +304,7 @@ function diagnostics(m){
  methods.forEach((name,i)=>{const row=document.createElement("tr");if(i===m)row.className="selected";const label=document.createElement("td"),value=document.createElement("td");label.textContent=labels[name];value.textContent=reward(i).toFixed(4);row.append(label,value);const metrics=data.report.methods?.[name]??{};for(const key of ["x_sliced_wasserstein","y_sliced_wasserstein","x_off_support_mass","y_off_support_mass"]){const cell=document.createElement("td");cell.textContent=Number.isFinite(metrics[key])?metrics[key].toFixed(4):"—";row.appendChild(cell);}table.appendChild(row);});document.getElementById("scores").replaceChildren(table);
  const round=data.report.round_trip?.[methods[m]];document.getElementById("roundTrip").textContent=round?`Inverse → forward reconstruction RMSE: X ${Number(round.x_rmse).toExponential(2)}, Y ${Number(round.y_rmse).toExponential(2)}.`:"";
 }
-function render(){const m=Number(methodSelect.value),t=Number(timeInput.value);document.getElementById("timeLabel").textContent=data.times[t].toFixed(2);pairs(document.getElementById("outputs"),data.output_x[m],data.output_y[m],data.bounds,true);pairs(document.getElementById("noise"),data.noise_x[m],data.noise_y[m],data.noise_bounds);field(document.getElementById("fieldX"),"x",m,t);field(document.getElementById("fieldY"),"y",m,t);diagnostics(m);}
+function render(){const m=Number(methodSelect.value),t=Number(timeInput.value);document.getElementById("timeLabel").textContent=data.times[t].toFixed(2);pairs(document.getElementById("outputs"),data.output_x[m],data.output_y[m],data.bounds,true);pairs(document.getElementById("noise"),data.noise_x[m],data.noise_y[m],data.noise_bounds,"source");field(document.getElementById("fieldX"),"x",m,t);field(document.getElementById("fieldY"),"y",m,t);diagnostics(m);}
 let timer=null;document.getElementById("play").addEventListener("click",()=>{if(timer){clearInterval(timer);timer=null;document.getElementById("play").textContent="Play";}else{document.getElementById("play").textContent="Pause";timer=setInterval(()=>{timeInput.value=String((Number(timeInput.value)+1)%data.times.length);render();},120);}});
 methodSelect.addEventListener("change",render);timeInput.addEventListener("input",render);render();
 </script></body></html>
@@ -305,7 +313,7 @@ methodSelect.addEventListener("change",render);timeInput.addEventListener("input
 
 def _interactive(output_dir: Path, data: dict[str, np.ndarray], report: dict[str, Any], title: str) -> Path:
     payload = {key: value.tolist() for key, value in data.items() if key not in {"joint_path", "ordinary_path", "ordinary_linear_path"}}
-    for key in ("reference_x", "reference_y"):
+    for key in ("reference_x", "reference_y", "source_reference"):
         if key in data:
             indices = np.linspace(0, len(data[key]) - 1, min(len(data[key]), 1000), dtype=int)
             payload[key] = data[key][indices].tolist()
@@ -321,7 +329,9 @@ def _interactive(output_dir: Path, data: dict[str, np.ndarray], report: dict[str
     # inserted with textContent rather than HTML interpolation.
     serialized = json.dumps(payload, allow_nan=False, separators=(",", ":"))
     serialized = serialized.replace("&", "\\u0026").replace("<", "\\u003c").replace(">", "\\u003e")
-    page = _HTML.replace("__TITLE__", html.escape(title)).replace("__MAX_TIME__", str(len(data["times"]) - 1)).replace("__MID_TIME__", str(int(np.argmin(np.abs(data["times"] - 0.5))))).replace("__DATA__", serialized)
+    description = ("Source: the two left disks. Both coupled outputs lie in the right-disk target distribution. The joint generator starts from two independent left-disk samples."
+                   if "source_reference" in data else "The source distribution is standard Gaussian.")
+    page = _HTML.replace("__TITLE__", html.escape(title)).replace("__SETUP_DESCRIPTION__", description).replace("__MAX_TIME__", str(len(data["times"]) - 1)).replace("__MID_TIME__", str(int(np.argmin(np.abs(data["times"] - 0.5))))).replace("__DATA__", serialized)
     path = output_dir / "demo.html"
     path.write_text(page, encoding="utf-8")
     return path

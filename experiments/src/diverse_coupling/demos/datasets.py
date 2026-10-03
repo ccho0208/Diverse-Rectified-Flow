@@ -11,6 +11,8 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from .sources import SourceDistribution
+
 
 def _positive_integer(value: int, name: str) -> int:
     if (
@@ -36,8 +38,8 @@ def _points(values: np.ndarray, name: str = "points") -> np.ndarray:
 
 
 def _side(side: str) -> str:
-    if side not in ("x", "y"):
-        raise ValueError("side must be 'x' or 'y'")
+    if side not in ("x", "y", "source"):
+        raise ValueError("side must be 'x', 'y', or 'source'")
     return side
 
 
@@ -66,9 +68,15 @@ class ExperimentSpec:
             angles = 2 * np.pi * np.arange(self.components) / self.components
             return 3.0 * np.column_stack((np.cos(angles), np.sin(angles)))
         if self.name == "two_disks":
-            horizontal = -2.0 if side == "x" else 2.0
+            horizontal = -2.0 if side == "source" else 2.0
             return np.array([[horizontal, 1.0], [horizontal, -1.0]])
         return None
+
+    def source_distribution(self, copies: int = 1) -> SourceDistribution:
+        """The disks start in left data space; other demos start in Gaussian noise."""
+        if self.name == "two_disks":
+            return SourceDistribution("uniform_disks", ((-2., 1.), (-2., -1.)), copies=copies)
+        return SourceDistribution()
 
     def radii(self) -> np.ndarray | None:
         """Return the annulus center radii, if applicable."""
@@ -156,6 +164,9 @@ class ExperimentSpec:
             result.update(centers=self.centers().tolist(), standard_deviation=0.15)
         elif self.name == "two_disks":
             result.update(
+                setup_version="left_disks_to_right_disks_v2",
+                source_centers=self.centers("source").tolist(),
+                target_centers=self.centers("x").tolist(),
                 x_centers=self.centers("x").tolist(),
                 y_centers=self.centers("y").tolist(),
                 disk_radius=0.3,

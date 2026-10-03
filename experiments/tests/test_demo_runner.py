@@ -10,6 +10,7 @@ import numpy as np
 import torch
 
 from diverse_coupling.demos.config import DemoConfig
+from diverse_coupling.demos.datasets import build_spec
 from diverse_coupling.demos.flows import load_flow
 from diverse_coupling.demos.runner import run_demos
 
@@ -65,7 +66,31 @@ class DemoRunnerTests(unittest.TestCase):
                                                    rtol=1e-5, atol=1e-6)
                     if name == "two_disks":
                         np.testing.assert_allclose(data["ordinary_linear_path"][0], data["ordinary_path"][0])
-                        self.assertIn("ordinary_transport", data["method_names"].tolist())
+                        self.assertNotIn("ordinary_transport", data["method_names"].tolist())
+                        self.assertIn("ordinary_transport", report)
+                        spec = build_spec(name)
+                        self.assertTrue(spec.support_mask(data["ordinary_path"][0], "source").all())
+                        np.testing.assert_array_equal(data["field_x"], data["field_y"])
+                if name == "two_disks":
+                    self.assertFalse((folder / "marginal_y").exists())
+                    with np.load(folder / "datasets.npz") as data:
+                        for key in ("target_x", "target_y", "reference_x", "reference_y"):
+                            self.assertTrue(spec.support_mask(data[key]).all())
+                        self.assertTrue(spec.support_mask(data["marginal_sources"], "source").all())
+                        for key, dimensions in (("pool_noise", 2), ("joint_noise", 4)):
+                            self.assertEqual(data[key].shape[1], dimensions)
+                            self.assertTrue(spec.support_mask(data[key].reshape(-1, 2), "source").all())
+                    with np.load(folder / "pool.npz") as data:
+                        np.testing.assert_allclose(data["noise_y"], [-4, 0] - data["noise_x"])
+                    with np.load(folder / "samples.npz") as data:
+                        self.assertTrue(spec.support_mask(data["initial_joint_noise"].reshape(-1, 2), "source").all())
+                    self.assertIn("reverse_source", report)
+                    _, marginal = load_flow(folder / "marginal_x/checkpoint.pt")
+                    _, joint = load_flow(folder / "joint/checkpoint.pt")
+                    self.assertEqual(marginal["source_kind"], "fixed")
+                    self.assertEqual(joint["source_kind"], "uniform_disks")
+                    self.assertEqual(joint["source_distribution"]["copies"], 2)
+                    self.assertIn("Both coupled outputs lie in the right-disk target", (folder / "demo.html").read_text())
 
     def test_resume_preserves_pool_and_extends_joint_training(self):
         with tempfile.TemporaryDirectory() as temporary, redirect_stdout(io.StringIO()):
@@ -109,6 +134,24 @@ class DemoRunnerTests(unittest.TestCase):
             path.write_text('{"typo_samples": 42}')
             with self.assertRaisesRegex(ValueError, "unknown"):
                 DemoConfig.load(path)
+
+    def test_disk_resume_matches_uninterrupted_and_rejects_old_gaussian_setup(self):
+        with tempfile.TemporaryDirectory() as temporary, redirect_stdout(io.StringIO()):
+            root = Path(temporary)
+            config = tiny_config(experiments=("two_disks",), ordinary_transport=False)
+            run_demos(config, root / "resumed")
+            run_demos(replace(config, joint_epochs=3), root / "resumed", resume=True)
+            run_demos(replace(config, joint_epochs=3), root / "full")
+            a, payload = load_flow(root / "resumed/two_disks/joint/checkpoint.pt")
+            b, _ = load_flow(root / "full/two_disks/joint/checkpoint.pt")
+            self.assertEqual(payload["source_kind"], "uniform_disks")
+            for p, q in zip(a.parameters(), b.parameters()):
+                torch.testing.assert_close(p, q, rtol=0, atol=0)
+            (root / "resumed/setup.json").unlink()
+            old_config = (root / "resumed/config.json").read_bytes()
+            with self.assertRaisesRegex(ValueError, "old two_disks.*new run directory"):
+                run_demos(config, root / "resumed", resume=True)
+            self.assertEqual(old_config, (root / "resumed/config.json").read_bytes())
 
 
 if __name__ == "__main__":
